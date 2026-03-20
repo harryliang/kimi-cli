@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import logging
 import warnings
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -33,6 +34,72 @@ if TYPE_CHECKING:
     from fastmcp.mcp_config import MCPConfig
 
 
+class ConcurrentLogHandlerSink:
+    """
+    将 concurrent_log_handler 包装为 loguru 的 sink，解决 Windows 多进程文件锁定问题。
+    """
+
+    def __init__(self, filepath: Path, max_bytes: int = 10 * 1024 * 1024, backup_count: int = 10):
+        try:
+            from concurrent_log_handler import ConcurrentRotatingFileHandler
+        except ImportError:
+            # 如果未安装 concurrent_log_handler，回退到标准 FileHandler
+            # 但会失去多进程安全保护
+            self._handler = logging.FileHandler(filepath, encoding="utf-8")
+        else:
+            self._handler = ConcurrentRotatingFileHandler(
+                filename=str(filepath),
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
+        # 使用与 loguru 默认格式兼容的格式
+        formatter = logging.Formatter(
+            "{levelname} | {asctime} | {name}:{lineno} - {message}",
+            style="{",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        self._handler.setFormatter(formatter)
+
+    def write(self, message: str) -> None:
+        # loguru 的消息包含换行符，需要去除
+        message = message.rstrip("\n\r")
+        if message:
+            # 从消息中提取级别 - loguru 格式: "LEVEL | timestamp | ..."
+            level = "INFO"
+            if message.startswith("TRACE"):
+                level = "TRACE"
+            elif message.startswith("DEBUG"):
+                level = "DEBUG"
+            elif message.startswith("INFO"):
+                level = "INFO"
+            elif message.startswith("SUCCESS"):
+                level = "INFO"
+            elif message.startswith("WARNING"):
+                level = "WARNING"
+            elif message.startswith("ERROR"):
+                level = "ERROR"
+            elif message.startswith("CRITICAL"):
+                level = "CRITICAL"
+
+            record = logging.LogRecord(
+                name="kimi_cli",
+                level=getattr(logging, level, logging.INFO),
+                pathname="",
+                lineno=0,
+                msg=message,
+                args=(),
+                exc_info=None,
+            )
+            self._handler.emit(record)
+
+    def flush(self) -> None:
+        self._handler.flush()
+
+    def close(self) -> None:
+        self._handler.close()
+
+
 def enable_logging(debug: bool = False, *, redirect_stderr: bool = True) -> None:
     # NOTE: stderr redirection is implemented by swapping the process-level fd=2 (dup2).
     # That can hide Click/Typer error output during CLI startup, so some entrypoints delay
@@ -41,13 +108,27 @@ def enable_logging(debug: bool = False, *, redirect_stderr: bool = True) -> None
     logger.enable("kimi_cli")
     if debug:
         logger.enable("kosong")
-    logger.add(
-        get_share_dir() / "logs" / "kimi.log",
-        # FIXME: configure level for different modules
-        level="TRACE" if debug else "INFO",
-        rotation="06:00",
-        retention="10 days",
+
+    # 使用 concurrent_log_handler 替代 loguru 的内置文件处理器
+    # 解决 Windows 上多进程环境下的文件锁定问题
+    log_file = get_share_dir() / "logs" / "kimi.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # 创建自定义 sink
+    concurrent_sink = ConcurrentLogHandlerSink(
+        filepath=log_file,
+        max_bytes=10 * 1024 * 1024,  # 10MB
+        backup_count=10,
     )
+
+    logger.add(
+        concurrent_sink,
+        level="TRACE" if debug else "INFO",
+        format="{level.name} | {time:YYYY-MM-DD HH:mm:ss} | {name}:{line} - {message}",
+        colorize=False,
+        enqueue=False,  # 不使用 loguru 的内部队列，因为 ConcurrentRotatingFileHandler 已经是线程安全的
+    )
+
     if redirect_stderr:
         redirect_stderr_to_logger()
 
