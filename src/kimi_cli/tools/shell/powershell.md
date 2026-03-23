@@ -14,7 +14,17 @@ If `run_in_background=true`, the command will be started as a background task an
 - Never attempt commands that require elevated (Administrator) privileges unless explicitly authorized.
 
 **Guidelines for efficiency:**
-- Chain related commands with `;` and use `if ($?)` or `if (-not $?)` to conditionally execute commands based on the success or failure of previous ones.
+- **PowerShell does NOT support `&&` or `||`** (these are bash operators). To run multiple commands:
+  - Use `;` to execute commands sequentially (unconditional): `cmd1; cmd2`
+  - Use `if ($?) { cmd2 }` to run cmd2 only if cmd1 succeeded: `cmd1; if ($?) { cmd2 }`
+  - Use `if (-not $?) { cmd2 }` to run cmd2 only if cmd1 failed: `cmd1; if (-not $?) { cmd2 }`
+- **PowerShell's `2>&1` behaves differently from Bash**: It wraps stderr in `ErrorRecord` objects with extra metadata. If you need clean stderr capture like Bash, consider using cmd.exe instead: `cmd /c "command 2>&1"`
+- **PowerShell quoting rules differ from Bash**:
+  - Single quotes `'...'` do NOT expand variables (e.g., `'$var'` stays as `$var`)
+  - Double quotes `"..."` DO expand variables (e.g., `"$var"` expands to its value)
+  - Backtick `` ` `` is the escape character, NOT backslash `\`
+  - To include a literal `$` in double quotes, escape it with backtick: `` `"$var` `` or use single quotes
+  - PowerShell does NOT support heredoc (`<<EOF`); for complex multi-line scripts, write to a file and execute
 - Redirect or pipe output with `>`, `>>`, `|`, and leverage `for /f`, `if`, and `set` to build richer one-liners instead of multiple tool calls.
 - Reuse built-in utilities (e.g., `findstr`, `where`) to filter, transform, or locate data in a single invocation.
 - Prefer `run_in_background=true` for long-running builds, tests, watchers, or servers when you need the conversation to continue before the command finishes.
